@@ -20,9 +20,7 @@ div.block-container {padding-top: 1rem; padding-bottom: 2rem;}
 div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
 div[data-testid="stMetricLabel"] {font-size: 0.9rem !important; font-weight: bold; color: #888;}
 button[data-baseweb="tab"] {font-size: 1.1rem; font-weight: 600;}
-.signal-box {
-    padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;
-}
+.signal-box {padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;}
 .bullish {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
 .bearish {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
 .neutral {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
@@ -50,21 +48,21 @@ def get_ai_analysis(api_key, model_name, context_data):
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         prompt = f"""
-        Analisi Flash per Trader ({context_data['asset']}):
-        1. COT: Z-Score Asset {context_data['cot_z']:.2f} | USD {context_data['usd_z']:.2f}
-        2. SENTIMENT: {context_data['sent_long']}% Long / {context_data['sent_short']}% Short
-        3. STAGIONALITÀ: Win {context_data['seas_win']}% | Ciclo a breve: {context_data['seas_trend']}
-        4. TECNICA: Prezzo {context_data['price']} | Trend: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
+        Sei un Senior Hedge Fund Trader. Analizza i dati per {context_data['asset']}:
         
-        Dammi SOLO:
-        1. Il Verdetto (Bullish/Bearish/Neutral)
-        2. Il motivo principale (es. "Confluenza COT e Sentiment")
-        3. Un livello di attenzione (es. "Attenti all'RSI alto")
+        DATA POINTS:
+        1. COT (Istituzionali): Z-Score Asset {context_data['cot_z']:.2f} | Z-Score USD {context_data['usd_z']:.2f}
+        2. FORZA RELATIVA: Asset {context_data['pwr_base']}/10 vs USD {context_data['pwr_usd']}/10
+        3. SENTIMENT (Retail): {context_data['sent_long']}% Long vs {context_data['sent_short']}% Short.
+        4. STAGIONALITÀ: Win Rate {context_data['seas_win']}% | Trend Ciclico: {context_data['seas_trend']}
+        5. TECNICA: Prezzo {context_data['price']} | Trend Fondo: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
+        
+        Rispondi alla domanda dell'utente o fornisci un'analisi strategica se non c'è domanda specifica.
+        Sii sintetico, professionale e usa emoji.
         """
-        response = model.generate_content(prompt)
-        return response.text
+        return model.generate_content(prompt).text
     except Exception as e:
-        if "429" in str(e): return "🚦 Limite richieste raggiunto. Attendi 1 min."
+        if "429" in str(e): return "🚦 Limite richieste raggiunto."
         return f"Errore AI: {str(e)}"
 
 # --- MOTORE 1: TECNICA ---
@@ -116,7 +114,7 @@ def get_currency_strength(pair_ticker):
         pair_move = pair.pct_change(5).iloc[-1] * 100
         
         usd_score = 5 + (dxy_move * 2.0)
-        base_chg_est = pair_chg + dxy_move
+        base_chg_est = pair_move + dxy_move
         base_score = 5 + (base_chg_est * 2.0)
         
         return {"base": max(0, min(10, base_score)), "usd": max(0, min(10, usd_score))}
@@ -224,57 +222,44 @@ st.title("🦅 Pro Analyst Dashboard")
 with st.expander("📘 GUIDA RAPIDA: Come interpretare i dati"):
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### 1. Macro COT ⚖️")
-        st.markdown("""
-        * **Z-Score:** Misura la deviazione dalla media annuale.
-          * `> +2.0`: Estremamente Long (Rischio inversione).
-          * `< -2.0`: Estremamente Short (Rischio inversione).
-        * **Divergenza:** Asset FORTE vs Dollaro DEBOLE = Long.
-        """)
-        st.markdown("### 2. Stagionalità 📅")
-        st.markdown("""
-        * **Win Rate:** Probabilità storica che il mese chiuda in positivo.
-        * **Ciclo (Grafico):** La direzione della linea conta più del Win Rate! Se la linea scende, il bias è short.
-        """)
+        st.markdown("**COT:** Z-Score > 2 (Long Estremo), < -2 (Short Estremo).")
+        st.markdown("**Open Interest:** Se Prezzo sale + OI sale = Trend Sano.")
+        st.markdown("**Forza Relativa:** Punta sull'asset con la barra più lunga.")
     with c2:
-        st.markdown("### 3. Sentiment Retail 🐑")
-        st.markdown("""
-        * **Contrarian:** La massa perde.
-            * `Long > 65%` -> Segnale **SHORT**.
-            * `Short > 65%` -> Segnale **LONG**.
-        """)
+        st.markdown("**Sentiment:** Contrarian (Se la folla è >60% Long, cerca Short).")
+        st.markdown("**Stagionalità:** Segui la pendenza della linea blu.")
 
 df_cot, cot_ok = download_cot_data(CFTC_URL)
 
 # SIDEBAR
-with st.sidebar:
-    st.header("⚙️ Configurazione")
-    asset_map = {
-        "EUR/USD":   {"base": "EURO FX", "usd": "USD INDEX", "yf": "EURUSD=X", "myfx": "EURUSD"},
-        "GBP/USD":   {"base": "BRITISH POUND", "usd": "USD INDEX", "yf": "GBPUSD=X", "myfx": "GBPUSD"},
-        "Gold":      {"base": "GOLD", "usd": "USD INDEX", "yf": "GC=F", "myfx": "XAUUSD"}, 
-        "Crude Oil": {"base": "CRUDE OIL", "usd": "USD INDEX", "yf": "CL=F", "myfx": "WTI"}, 
-        "Bitcoin":   {"base": "BITCOIN", "usd": "USD INDEX", "yf": "BTC-USD", "myfx": "BTCUSD"},
-        "S&P 500":   {"base": "E-MINI S&P 500", "usd": "USD INDEX", "yf": "ES=F", "myfx": "SP500"}
-    }
-    sel_asset = st.selectbox("Asset Class", list(asset_map.keys()))
-    cfg = asset_map[sel_asset]
-    
-    st.markdown("---")
-    if "GEMINI_KEY" in st.secrets:
-        gemini_key = st.secrets["GEMINI_KEY"]
-        st.success("🔑 AI Ready")
-    else:
-        gemini_key = st.text_input("API Key (Opzionale)", type="password")
-    
-    selected_model = None
-    if gemini_key:
-        mods = get_filtered_models(gemini_key)
-        if mods: selected_model = st.selectbox("Modello AI", mods)
+st.sidebar.header("⚙️ Configurazione")
+asset_map = {
+    "EUR/USD":   {"base": "EURO FX", "usd": "USD INDEX", "yf": "EURUSD=X", "myfx": "EURUSD"},
+    "GBP/USD":   {"base": "BRITISH POUND", "usd": "USD INDEX", "yf": "GBPUSD=X", "myfx": "GBPUSD"},
+    "Gold":      {"base": "GOLD", "usd": "USD INDEX", "yf": "GC=F", "myfx": "XAUUSD"}, 
+    "Crude Oil": {"base": "CRUDE OIL", "usd": "USD INDEX", "yf": "CL=F", "myfx": "WTI"}, 
+    "Bitcoin":   {"base": "BITCOIN", "usd": "USD INDEX", "yf": "BTC-USD", "myfx": "BTCUSD"},
+    "S&P 500":   {"base": "E-MINI S&P 500", "usd": "USD INDEX", "yf": "ES=F", "myfx": "SP500"}
+}
+sel_asset = st.sidebar.selectbox("Seleziona Asset", list(asset_map.keys()))
+cfg = asset_map[sel_asset]
+
+st.sidebar.markdown("---")
+if "GEMINI_KEY" in st.secrets:
+    gemini_key = st.secrets["GEMINI_KEY"]
+    st.sidebar.success("🔑 AI Ready")
+else:
+    gemini_key = st.sidebar.text_input("API Key (Opzionale)", type="password")
+
+# Selettore Modello
+selected_model = None
+if gemini_key:
+    mods = get_filtered_models(gemini_key)
+    if mods: selected_model = st.sidebar.selectbox("Modello AI", mods)
 
 # --- CALCOLI ---
 tech = get_technical_analysis(cfg["yf"])
-pwr = get_currency_strength(cfg["yf"])
+pwr = get_currency_strength(cfg["yf"]) # REINSERITO
 seas = get_seasonality_pro(cfg["yf"])
 sent = get_sentiment_data(cfg["myfx"])
 cot_base, cot_usd = None, None
@@ -311,9 +296,9 @@ with c4:
     else:
         st.markdown('<div class="signal-box neutral">✋ MARKET NEUTRAL / WAIT</div>', unsafe_allow_html=True)
 
-# --- FORZA RELATIVA ---
+# --- FORZA RELATIVA (REINSERITA) ---
 if pwr:
-    st.markdown("### 💪 Forza Relativa")
+    st.markdown("### 💪 Forza Relativa (Power Meter)")
     cp1, cp2 = st.columns(2)
     asset_name = sel_asset.split('/')[0]
     with cp1:
@@ -324,7 +309,7 @@ if pwr:
         st.progress(pwr['usd'] / 10)
     st.markdown("---")
 
-# --- MAIN TABS ---
+# --- TABS ---
 tab1, tab2, tab3 = st.tabs(["🔍 Analisi Macro (COT)", "📅 Stagionalità & Cicli", "🐑 Sentiment & Volumi"])
 
 with tab1:
@@ -356,9 +341,7 @@ with tab1:
             raw["Δ Long"] = raw["Long"] - raw["Long"].shift(-1)
             raw["Δ Short"] = raw["Short"] - raw["Short"].shift(-1)
             raw["Δ Net"] = raw["Net"] - raw["Net"].shift(-1)
-            display_table = raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short", "Net"]].copy()
-            display_table["Date"] = display_table["Date"].dt.strftime('%d/%m')
-            st.dataframe(display_table.style.format({"Long": "{:,.0f}", "Short": "{:,.0f}", "Net": "{:,.0f}", "Δ Long": "{:+,.0f}", "Δ Short": "{:+,.0f}"}), hide_index=True, use_container_width=True)
+            st.dataframe(raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short"]], use_container_width=True)
     else:
         st.warning("Dati COT non disponibili.")
 
@@ -378,7 +361,7 @@ with tab2:
             ).properties(height=250)
             st.altair_chart(line + today_line, use_container_width=True)
             
-            # CALCOLO PENDENZA (LOPE)
+            # CALCOLO PENDENZA
             curr_day = seas['day']
             trend_30 = "ND"
             try:
@@ -417,14 +400,13 @@ with tab3:
 
 st.markdown("---")
 
-# --- CHAT AI INTERATTIVA (CON PULSANTI RAPIDI) ---
+# --- CHAT AI (CON PULSANTI RAPIDI) ---
 st.subheader("💬 Chatta con l'Analista AI")
 
 if gemini_key and selected_model:
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Pulsanti Rapidi
     st.write("Prompt Rapidi:")
     c_p1, c_p2, c_p3, c_p4 = st.columns(4)
     prompt_btn = None
@@ -433,22 +415,18 @@ if gemini_key and selected_model:
     if c_p3.button("🚦 Consiglio Operativo"): prompt_btn = "Dammi un consiglio operativo (Buy/Sell/Wait) basato sulla confluenza dei dati."
     if c_p4.button("🧠 Spiegami i Rischi"): prompt_btn = "Quali sono i principali rischi tecnici o macro per un trade adesso?"
 
-    # Cronologia
     for message in st.session_state.messages:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Input Utente
     user_input = st.chat_input("Chiedi qualcosa...")
-    
-    if prompt_btn: user_input = prompt_btn # Override se clicca pulsante
+    if prompt_btn: user_input = prompt_btn 
 
     if user_input:
         st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
             st.markdown(user_input)
 
-        # Contesto Dati
         seas_trend_txt = trend_30 if 'trend_30' in locals() else "ND"
         
         context_str = f"""
@@ -468,7 +446,7 @@ if gemini_key and selected_model:
                 try:
                     genai.configure(api_key=gemini_key)
                     model = genai.GenerativeModel(selected_model)
-                    full_prompt = f"Sei un Trader esperto. Rispondi alla domanda basandoti su questi dati:\n{context_str}\n\nDOMANDA: {user_input}"
+                    full_prompt = f"Sei un Trader esperto. Rispondi basandoti su questi dati:\n{context_str}\n\nDOMANDA: {user_input}"
                     response = model.generate_content(full_prompt)
                     st.markdown(response.text)
                     st.session_state.messages.append({"role": "assistant", "content": response.text})
