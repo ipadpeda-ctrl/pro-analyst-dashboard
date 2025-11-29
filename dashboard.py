@@ -20,7 +20,9 @@ div.block-container {padding-top: 1rem; padding-bottom: 2rem;}
 div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
 div[data-testid="stMetricLabel"] {font-size: 0.9rem !important; font-weight: bold; color: #888;}
 button[data-baseweb="tab"] {font-size: 1.1rem; font-weight: 600;}
-.signal-box {padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;}
+.signal-box {
+    padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;
+}
 .bullish {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
 .bearish {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
 .neutral {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
@@ -32,7 +34,7 @@ current_year = datetime.now().year
 CFTC_URL = f"https://www.cftc.gov/files/dea/history/deacot{current_year}.zip"
 SENTIMENT_URL = "https://www.myfxbook.com/community/outlook"
 
-# --- MOTORE AI (FILTRI E FUNZIONI) ---
+# --- MOTORE AI ---
 def get_filtered_models(api_key):
     try:
         genai.configure(api_key=api_key)
@@ -42,6 +44,28 @@ def get_filtered_models(api_key):
         if not available: available = [m for m in all_models if 'exp' not in m]
         return available
     except: return []
+
+def get_ai_analysis(api_key, model_name, context_data):
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        prompt = f"""
+        Analisi Flash per Trader ({context_data['asset']}):
+        1. COT: Z-Score Asset {context_data['cot_z']:.2f} | USD {context_data['usd_z']:.2f}
+        2. SENTIMENT: {context_data['sent_long']}% Long / {context_data['sent_short']}% Short
+        3. STAGIONALITÀ: Win {context_data['seas_win']}% | Ciclo a breve: {context_data['seas_trend']}
+        4. TECNICA: Prezzo {context_data['price']} | Trend: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
+        
+        Dammi SOLO:
+        1. Il Verdetto (Bullish/Bearish/Neutral)
+        2. Il motivo principale (es. "Confluenza COT e Sentiment")
+        3. Un livello di attenzione (es. "Attenti all'RSI alto")
+        """
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        if "429" in str(e): return "🚦 Limite richieste raggiunto. Attendi 1 min."
+        return f"Errore AI: {str(e)}"
 
 # --- MOTORE 1: TECNICA ---
 def get_technical_analysis(ticker):
@@ -68,7 +92,8 @@ def get_technical_analysis(ticker):
         atr = tr.rolling(14).mean().iloc[-1]
         
         status = "NEUTRO"
-        if sma200: status = "ALZISTA" if curr > sma200 else "RIBASSISTA"
+        if sma200:
+            status = "ALZISTA" if curr > sma200 else "RIBASSISTA"
             
         return {"price": curr, "change": chg, "trend_desc": status, "rsi": rsi, "atr": atr, "sma200": sma200}
     except: return None
@@ -91,8 +116,8 @@ def get_currency_strength(pair_ticker):
         pair_move = pair.pct_change(5).iloc[-1] * 100
         
         usd_score = 5 + (dxy_move * 2.0)
-        base_move = pair_move + dxy_move
-        base_score = 5 + (base_move * 2.0)
+        base_chg_est = pair_chg + dxy_move
+        base_score = 5 + (base_chg_est * 2.0)
         
         return {"base": max(0, min(10, base_score)), "usd": max(0, min(10, usd_score))}
     except: return None
@@ -195,25 +220,28 @@ def get_seasonality_pro(ticker):
 # ==============================================================================
 st.title("🦅 Pro Analyst Dashboard")
 
-# --- GUIDA COMPLETA RIPRISTINATA ---
-with st.expander("📘 GUIDA OPERATIVA (Clicca per aprire)"):
-    t1, t2, t3 = st.tabs(["🏦 Macro COT", "📅 Stagionalità", "🚦 Strategia"])
-    with t1:
+# --- GUIDA ---
+with st.expander("📘 GUIDA RAPIDA: Come interpretare i dati"):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("### 1. Macro COT ⚖️")
         st.markdown("""
         * **Z-Score:** Misura la deviazione dalla media annuale.
-          * `> +2.0`: Estremamente Long (Possibile Top).
-          * `< -2.0`: Estremamente Short (Possibile Bottom).
-        * **Forza Relativa:** Confronta la spinta dell'Asset rispetto al Dollaro.
+          * `> +2.0`: Estremamente Long (Rischio inversione).
+          * `< -2.0`: Estremamente Short (Rischio inversione).
+        * **Divergenza:** Asset FORTE vs Dollaro DEBOLE = Long.
         """)
-    with t2:
+        st.markdown("### 2. Stagionalità 📅")
         st.markdown("""
-        * **Win Rate:** Probabilità storica che il mese sia positivo.
-        * **Ciclo Annuale:** Linea blu mostra il trend medio storico.
+        * **Win Rate:** Probabilità storica che il mese chiuda in positivo.
+        * **Ciclo (Grafico):** La direzione della linea conta più del Win Rate! Se la linea scende, il bias è short.
         """)
-    with t3:
+    with c2:
+        st.markdown("### 3. Sentiment Retail 🐑")
         st.markdown("""
-        * **Sentiment Contrarian:** Se Retail Long > 60% -> Cerca Short.
-        * **Tecnica:** Non comprare se il prezzo è sotto la SMA200.
+        * **Contrarian:** La massa perde.
+            * `Long > 65%` -> Segnale **SHORT**.
+            * `Short > 65%` -> Segnale **LONG**.
         """)
 
 df_cot, cot_ok = download_cot_data(CFTC_URL)
@@ -239,7 +267,6 @@ with st.sidebar:
     else:
         gemini_key = st.text_input("API Key (Opzionale)", type="password")
     
-    # Selettore Modello
     selected_model = None
     if gemini_key:
         mods = get_filtered_models(gemini_key)
@@ -284,7 +311,7 @@ with c4:
     else:
         st.markdown('<div class="signal-box neutral">✋ MARKET NEUTRAL / WAIT</div>', unsafe_allow_html=True)
 
-# --- POWER METER ---
+# --- FORZA RELATIVA ---
 if pwr:
     st.markdown("### 💪 Forza Relativa")
     cp1, cp2 = st.columns(2)
@@ -297,7 +324,7 @@ if pwr:
         st.progress(pwr['usd'] / 10)
     st.markdown("---")
 
-# --- TABS ---
+# --- MAIN TABS ---
 tab1, tab2, tab3 = st.tabs(["🔍 Analisi Macro (COT)", "📅 Stagionalità & Cicli", "🐑 Sentiment & Volumi"])
 
 with tab1:
@@ -329,7 +356,9 @@ with tab1:
             raw["Δ Long"] = raw["Long"] - raw["Long"].shift(-1)
             raw["Δ Short"] = raw["Short"] - raw["Short"].shift(-1)
             raw["Δ Net"] = raw["Net"] - raw["Net"].shift(-1)
-            st.dataframe(raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short"]], use_container_width=True)
+            display_table = raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short", "Net"]].copy()
+            display_table["Date"] = display_table["Date"].dt.strftime('%d/%m')
+            st.dataframe(display_table.style.format({"Long": "{:,.0f}", "Short": "{:,.0f}", "Net": "{:,.0f}", "Δ Long": "{:+,.0f}", "Δ Short": "{:+,.0f}"}), hide_index=True, use_container_width=True)
     else:
         st.warning("Dati COT non disponibili.")
 
@@ -348,6 +377,25 @@ with tab2:
                 y=alt.Y('Valore', scale=alt.Scale(zero=False), title='Indice')
             ).properties(height=250)
             st.altair_chart(line + today_line, use_container_width=True)
+            
+            # CALCOLO PENDENZA (LOPE)
+            curr_day = seas['day']
+            trend_30 = "ND"
+            try:
+                today_val = seas['chart'].iloc[curr_day - 1]
+                future_idx = min(curr_day + 30, 364)
+                future_val = seas['chart'].iloc[future_idx]
+                
+                if future_val > today_val * 1.005: 
+                    trend_30 = "RIALZISTA 📈" 
+                    st.metric("Ciclo (30gg)", trend_30, delta="Positivo", delta_color="normal")
+                elif future_val < today_val * 0.995: 
+                    trend_30 = "RIBASSISTA 📉"
+                    st.metric("Ciclo (30gg)", trend_30, delta="Negativo", delta_color="inverse")
+                else: 
+                    trend_30 = "LATERALE ➡️"
+                    st.metric("Ciclo (30gg)", trend_30, delta="Neutro", delta_color="off")
+            except: pass
 
 with tab3:
     if sent["status"] == "OK":
@@ -390,22 +438,19 @@ if gemini_key and selected_model:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-    # Input Utente (Manuale o da Bottone)
+    # Input Utente
     user_input = st.chat_input("Chiedi qualcosa...")
     
-    # Logica di invio
-    final_prompt = None
-    if prompt_btn:
-        final_prompt = prompt_btn
-    elif user_input:
-        final_prompt = user_input
+    if prompt_btn: user_input = prompt_btn # Override se clicca pulsante
 
-    if final_prompt:
-        st.session_state.messages.append({"role": "user", "content": final_prompt})
+    if user_input:
+        st.session_state.messages.append({"role": "user", "content": user_input})
         with st.chat_message("user"):
-            st.markdown(final_prompt)
+            st.markdown(user_input)
 
         # Contesto Dati
+        seas_trend_txt = trend_30 if 'trend_30' in locals() else "ND"
+        
         context_str = f"""
         ASSET: {sel_asset}
         DATI LIVE:
@@ -415,6 +460,7 @@ if gemini_key and selected_model:
         - COT Z-Score: {cot_base['z_score'] if cot_base else 'ND'} (USD Z: {cot_usd['z_score'] if cot_usd else 'ND'})
         - Sentiment Retail: {sent['long'] if sent['status']=='OK' else 0}% Long
         - Stagionalità Win Rate: {int(seas['win_rate']) if seas else 0}%
+        - Ciclo Stagionale Prossimi 30gg: {seas_trend_txt}
         """
         
         with st.chat_message("assistant"):
@@ -422,11 +468,11 @@ if gemini_key and selected_model:
                 try:
                     genai.configure(api_key=gemini_key)
                     model = genai.GenerativeModel(selected_model)
-                    full_prompt = f"Sei un Trader esperto. Rispondi basandoti su questi dati:\n{context_str}\n\nDOMANDA: {final_prompt}"
+                    full_prompt = f"Sei un Trader esperto. Rispondi alla domanda basandoti su questi dati:\n{context_str}\n\nDOMANDA: {user_input}"
                     response = model.generate_content(full_prompt)
                     st.markdown(response.text)
                     st.session_state.messages.append({"role": "assistant", "content": response.text})
                 except Exception as e:
-                    st.error(f"Errore AI: {e}")
+                    st.error(f"Errore: {e}")
 else:
     st.info("Inserisci la chiave API per attivare la chat.")
