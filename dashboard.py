@@ -9,17 +9,35 @@ from bs4 import BeautifulSoup
 import altair as alt
 import google.generativeai as genai
 
-st.set_page_config(page_title="Pro Trend Dashboard", layout="wide")
+st.set_page_config(page_title="Pro Trend Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 # ==============================================================================
-# CSS PERSONALIZZATO
+# CSS PERSONALIZZATO (DESIGN PULITO)
 # ==============================================================================
 st.markdown("""
 <style>
-div.block-container {padding-top: 2rem; padding-bottom: 2rem;}
-.st-emotion-cache-vj0p0d.ezrtsby2 {text-align: center;}
-div[data-testid="stMetricValue"] {font-size: 1.6rem !important;}
-[data-testid="stProgress"] {margin-top: -10px !important; margin-bottom: 10px !important;}
+/* Spaziatura ridotta */
+div.block-container {padding-top: 1rem; padding-bottom: 2rem;}
+
+/* Metriche più leggibili */
+div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
+div[data-testid="stMetricLabel"] {font-size: 0.9rem !important; font-weight: bold; color: #888;}
+
+/* Tabs più evidenti */
+button[data-baseweb="tab"] {font-size: 1.1rem; font-weight: 600;}
+
+/* Box colorati per i segnali */
+.signal-box {
+    padding: 15px;
+    border-radius: 8px;
+    text-align: center;
+    font-weight: bold;
+    font-size: 1.2rem;
+    margin-bottom: 10px;
+}
+.bullish {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
+.bearish {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
+.neutral {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
 </style>
 """, unsafe_allow_html=True)
 
@@ -28,67 +46,48 @@ current_year = datetime.now().year
 CFTC_URL = f"https://www.cftc.gov/files/dea/history/deacot{current_year}.zip"
 SENTIMENT_URL = "https://www.myfxbook.com/community/outlook"
 
-# --- MOTORE AI: LISTA MODELLI DINAMICA ---
-def get_available_models(api_key):
-    """Chiede a Google quali modelli sono disponibili per questa chiave."""
+# --- MOTORE AI ---
+def get_filtered_models(api_key):
     try:
         genai.configure(api_key=api_key)
-        models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                models.append(m.name)
-        return models
-    except:
-        return []
+        priority_list = ['gemini-1.5-flash', 'gemini-1.5-flash-latest', 'gemini-1.5-pro']
+        all_models = [m.name.replace('models/', '') for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+        available = [m for m in priority_list if m in all_models]
+        if not available: available = [m for m in all_models if 'exp' not in m]
+        return available
+    except: return []
 
 def get_ai_analysis(api_key, model_name, context_data):
     try:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
-        
         prompt = f"""
-        Agisci come un Senior Hedge Fund Trader. Analizza questi dati di mercato per {context_data['asset']}:
+        Analisi Flash per Trader ({context_data['asset']}):
+        1. COT: Z-Score Asset {context_data['cot_z']:.2f} | USD {context_data['usd_z']:.2f}
+        2. SENTIMENT: {context_data['sent_long']}% Long / {context_data['sent_short']}% Short
+        3. STAGIONALITÀ: Win {context_data['seas_win']}% | Trend: {context_data['seas_trend']}
+        4. TECNICA: Prezzo {context_data['price']} | Trend: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
         
-        1. MACRO COT: Z-Score Asset: {context_data['cot_z']:.2f} | Z-Score USD: {context_data['usd_z']:.2f}
-        2. SENTIMENT RETAIL: {context_data['sent_long']}% Long vs {context_data['sent_short']}% Short.
-        3. STAGIONALITÀ: Win Rate {context_data['seas_win']}% | Previsione: {context_data['seas_trend']}
-        4. TECNICA: Prezzo {context_data['price']} | Trend Fondo: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
-        
-        Sintetizza in 3 punti bullet points brevi:
-        - Situazione Macro (Confluenza o Conflitto?)
-        - Rischi (Timing, livelli tecnici)
-        - Verdetto Operativo (Buy, Sell, Wait)
-        Sii diretto, professionale e usa emoji.
+        Dammi SOLO:
+        1. Il Verdetto (Bullish/Bearish/Neutral)
+        2. Il motivo principale (es. "Confluenza COT e Sentiment")
+        3. Un livello di attenzione (es. "Attenti all'RSI alto")
         """
-        
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e:
-        return f"Errore AI: {str(e)}"
+    except Exception as e: return f"Errore AI: {str(e)}"
 
-# --- MOTORE 1: ANALISI TECNICA ---
+# --- MOTORE 1: TECNICA ---
 def get_technical_analysis(ticker):
     try:
         stock = yf.Ticker(ticker)
         hist = stock.history(period="2y")
         if hist.empty: return None
-        
         curr = hist["Close"].iloc[-1]
         prev = hist["Close"].iloc[-2]
         chg = ((curr - prev) / prev) * 100
-        
-        sma200, sma50 = None, None
-        status = "Dati Insufficienti ❓"
-        
-        if len(hist) >= 200:
-            sma50 = hist["Close"].rolling(50).mean().iloc[-1]
-            sma200 = hist["Close"].rolling(200).mean().iloc[-1]
-            if curr > sma200:
-                status = "ALZISTA (Sopra SMA200) 🟢"
-                if curr < sma50: status += " [In Ritracciamento ⚠️]"
-            else:
-                status = "RIBASSISTA (Sotto SMA200) 🔴"
-                if curr > sma50: status += " [Possibile Inversione ⚠️]"
+        sma200 = hist["Close"].rolling(200).mean().iloc[-1] if len(hist) >= 200 else None
+        sma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else None
         
         delta = hist["Close"].diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
@@ -101,6 +100,10 @@ def get_technical_analysis(ticker):
         l_c = np.abs(hist["Low"] - hist["Close"].shift())
         tr = np.max(pd.concat([high_low, h_c, l_c], axis=1), axis=1)
         atr = tr.rolling(14).mean().iloc[-1]
+        
+        status = "NEUTRO"
+        if sma200:
+            status = "ALZISTA" if curr > sma200 else "RIBASSISTA"
             
         return {"price": curr, "change": chg, "trend_desc": status, "rsi": rsi, "atr": atr, "sma200": sma200}
     except: return None
@@ -151,7 +154,6 @@ def analyze_cot_pro(df, asset_name):
     if asset_name in ["EURO FX", "BRITISH POUND"]: 
         exclude_mask = df["Asset"].str.contains("XRATE", case=False, na=False)
         mask = mask & ~exclude_mask 
-    
     matches = df[mask]["Asset"].unique()
     if len(matches) == 0: return None
     
@@ -165,16 +167,14 @@ def analyze_cot_pro(df, asset_name):
     
     lookback = d.head(52).copy()
     curr = lookback.iloc[0]["Net"]
-    mn, mx = lookback["Net"].min(), lookback["Net"].max()
     std = lookback["Net"].std()
     mean = lookback["Net"].mean()
-    idx = ((curr - mn) / (mx - mn)) * 100 if mx != mn else 50
+    idx = ((curr - lookback["Net"].min()) / (lookback["Net"].max() - lookback["Net"].min())) * 100
     z_score = (curr - mean) / std if std != 0 else 0
     
     return {
-        "name": best, "net": curr, "index": idx, 
-        "z_score": z_score, 
-        "history": lookback.set_index("Date")["Net"],
+        "name": best, "net": curr, "index": idx, "z_score": z_score, 
+        "history": lookback.set_index("Date")["Net"], 
         "history_full": lookback.set_index("Date")[["Net", "Long", "Short", "OpenInt"]],
         "raw_data": d
     }
@@ -186,237 +186,172 @@ def get_seasonality_pro(ticker):
         stock = yf.Ticker(ticker)
         hist = stock.history(period="10y")
         if hist.empty or len(hist) < 200: return None
-        
-        m_ret = hist['Close'].resample('ME').ffill().pct_change()
+        m_ret = hist['Close'].resample('ME').ffill().pct_change().dropna()
         curr_m = datetime.now().month
         hist_curr_m = m_ret[m_ret.index.month == curr_m].dropna()
         win_rate = (len(hist_curr_m[hist_curr_m > 0]) / len(hist_curr_m)) * 100 if len(hist_curr_m) > 0 else 50
-        avg_ret = hist_curr_m.mean() * 100 if len(hist_curr_m) > 0 else 0
         
         df_seas = hist[['Close']].copy()
         df_seas['DayOfYear'] = df_seas.index.dayofyear
         df_seas['Year'] = df_seas.index.year
-        
         piv = df_seas.pivot_table(index='DayOfYear', columns='Year', values='Close')
         piv_norm = piv.apply(lambda x: (x / x.dropna().iloc[0]) * 100 if not x.dropna().empty else np.nan)
         avg_path = piv_norm.mean(axis=1)
         avg_path_smooth = avg_path.rolling(window=7, center=True).mean().fillna(method='bfill').fillna(method='ffill')
-        
-        return {"win_rate": win_rate, "avg_return": avg_ret, "chart": avg_path_smooth, "day": datetime.now().timetuple().tm_yday}
+        return {"win_rate": win_rate, "chart": avg_path_smooth, "day": datetime.now().timetuple().tm_yday}
     except: return None
 
 # ==============================================================================
-# DASHBOARD
+# DASHBOARD START
 # ==============================================================================
 st.title("🦅 Pro Analyst Dashboard")
 
-# --- GUIDA ---
-with st.expander("📘 GUIDA RAPIDA"):
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**COT:** Z-Score > 2 (Long Estremo), < -2 (Short Estremo).")
-        st.markdown("**Open Interest:** Se Prezzo sale + OI sale = Trend Sano.")
-    with c2:
-        st.markdown("**Sentiment:** Contrarian (Fai l'opposto della massa).")
-
 df_cot, cot_ok = download_cot_data(CFTC_URL)
 
-# SIDEBAR
-st.sidebar.header("⚙️ Asset Manager")
-asset_map = {
-    "EUR/USD":   {"base": "EURO FX", "usd": "USD INDEX", "yf": "EURUSD=X", "myfx": "EURUSD"},
-    "GBP/USD":   {"base": "BRITISH POUND", "usd": "USD INDEX", "yf": "GBPUSD=X", "myfx": "GBPUSD"},
-    "Gold":      {"base": "GOLD", "usd": "USD INDEX", "yf": "GC=F", "myfx": "XAUUSD"}, 
-    "Crude Oil": {"base": "CRUDE OIL", "usd": "USD INDEX", "yf": "CL=F", "myfx": "WTI"}, 
-    "Bitcoin":   {"base": "BITCOIN", "usd": "USD INDEX", "yf": "BTC-USD", "myfx": "BTCUSD"},
-    "S&P 500":   {"base": "E-MINI S&P 500", "usd": "USD INDEX", "yf": "ES=F", "myfx": "SP500"}
-}
-sel_asset = st.sidebar.selectbox("Seleziona Asset", list(asset_map.keys()))
-cfg = asset_map[sel_asset]
+# --- SIDEBAR (CONFIGURAZIONE) ---
+with st.sidebar:
+    st.header("⚙️ Configurazione")
+    asset_map = {
+        "EUR/USD":   {"base": "EURO FX", "usd": "USD INDEX", "yf": "EURUSD=X", "myfx": "EURUSD"},
+        "GBP/USD":   {"base": "BRITISH POUND", "usd": "USD INDEX", "yf": "GBPUSD=X", "myfx": "GBPUSD"},
+        "Gold":      {"base": "GOLD", "usd": "USD INDEX", "yf": "GC=F", "myfx": "XAUUSD"}, 
+        "Crude Oil": {"base": "CRUDE OIL", "usd": "USD INDEX", "yf": "CL=F", "myfx": "WTI"}, 
+        "Bitcoin":   {"base": "BITCOIN", "usd": "USD INDEX", "yf": "BTC-USD", "myfx": "BTCUSD"},
+        "S&P 500":   {"base": "E-MINI S&P 500", "usd": "USD INDEX", "yf": "ES=F", "myfx": "SP500"}
+    }
+    sel_asset = st.selectbox("Asset Class", list(asset_map.keys()))
+    cfg = asset_map[sel_asset]
+    
+    st.markdown("---")
+    st.caption("🤖 AI Copilot (Opzionale)")
+    gemini_key = st.text_input("API Key", type="password", placeholder="Incolla AIza...")
+    selected_model = None
+    if gemini_key:
+        mods = get_filtered_models(gemini_key)
+        if mods: selected_model = st.selectbox("Modello", mods)
 
-# --- AI KEY INPUT & SELECTOR ---
-st.sidebar.markdown("---")
-st.sidebar.header("🤖 AI Copilot")
-gemini_key = st.sidebar.text_input("Gemini API Key", type="password")
-
-# Selettore Modello Dinamico
-selected_model = None
-if gemini_key:
-    available_models = get_available_models(gemini_key)
-    if available_models:
-        st.sidebar.success(f"✅ Trovati {len(available_models)} modelli")
-        selected_model = st.sidebar.selectbox("Scegli Modello", available_models, index=0)
-    else:
-        st.sidebar.warning("Chiave valida ma nessun modello 'generateContent' trovato.")
-
-# HEADER
+# --- CALCOLI PRELIMINARI ---
 tech = get_technical_analysis(cfg["yf"])
+seas = get_seasonality_pro(cfg["yf"])
+sent = get_sentiment_data(cfg["myfx"])
+cot_base, cot_usd = None, None
+if cot_ok:
+    cot_base = analyze_cot_pro(df_cot, cfg["base"])
+    cot_usd = analyze_cot_pro(df_cot, cfg["usd"])
+
+# --- TOP BAR: RIASSUNTO ESECUTIVO ---
+# Calcolo Punteggio Totale
+total_score = 0
+cot_score = 0
+if cot_base and cot_usd:
+    if cot_base['z_score'] > 0.5 and cot_usd['z_score'] < -0.5: cot_score = 1
+    elif cot_base['z_score'] < -0.5 and cot_usd['z_score'] > 0.5: cot_score = -1
+    
+seas_score = 0
+if seas and seas['win_rate'] >= 65: seas_score = 1
+elif seas and seas['win_rate'] <= 35: seas_score = -1
+
+sent_score = 0
+if sent["status"] == "OK":
+    if sent['long'] > 60: sent_score = -1
+    elif sent['short'] > 60: sent_score = 1
+
+total_score = cot_score + seas_score + sent_score
+
+# Visualizzazione Top Bar
+c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 if tech:
-    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Prezzo", f"{tech['price']:.4f}", f"{tech['change']:.2f}%")
-    trend_txt = tech["trend_desc"].split(" ")[0] if tech["sma200"] is not None else "N/A"
-    c2.metric("Trend di Fondo", trend_txt) 
-    rsi_c = "inverse" if tech['rsi'] > 70 else "normal"
-    c3.metric("RSI (14)", f"{tech['rsi']:.1f}", "Ipercomprato" if tech['rsi']>70 else "Neutro", delta_color=rsi_c)
-    c4.metric("Volatilità (ATR)", f"{tech['atr']:.4f}")
-    
-st.markdown("---")
+    c2.metric("RSI (14)", f"{tech['rsi']:.1f}", delta_color="off")
+    c3.metric("Trend", tech['trend_desc'], delta_color="off")
 
-col1, col2, col3 = st.columns(3)
+# Box Verdetto
+with c4:
+    if total_score >= 2:
+        st.markdown('<div class="signal-box bullish">🔥 STRONG BUY OPPORTUNITY</div>', unsafe_allow_html=True)
+    elif total_score <= -2:
+        st.markdown('<div class="signal-box bearish">❄️ STRONG SELL OPPORTUNITY</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="signal-box neutral">✋ MARKET NEUTRAL / WAIT</div>', unsafe_allow_html=True)
 
-# VARIABILI DATI PER AI
-ai_context = {}
+# --- AI ANALYST (Se attivato) ---
+if gemini_key and selected_model and st.button("🤖 Analizza con AI"):
+    ai_ctx = {
+        'asset': sel_asset,
+        'cot_z': cot_base['z_score'] if cot_base else 0,
+        'usd_z': cot_usd['z_score'] if cot_usd else 0,
+        'sent_long': sent['long'] if sent['status']=='OK' else 50,
+        'sent_short': sent['short'] if sent['status']=='OK' else 50,
+        'seas_win': int(seas['win_rate']) if seas else 50,
+        'seas_trend': "ND",
+        'price': tech['price'], 'trend': tech['trend_desc'], 'rsi': tech['rsi']
+    }
+    with st.spinner("L'AI sta ragionando..."):
+        st.info(get_ai_analysis(gemini_key, selected_model, ai_ctx))
 
-# 1. MACRO COT
-with col1:
-    st.header("1. Macro COT ⚖️")
-    if cot_ok:
-        base = analyze_cot_pro(df_cot, cfg["base"])
-        usd = analyze_cot_pro(df_cot, cfg["usd"])
-        
-        if base and usd:
-            st.write(f"**{sel_asset.split('/')[0]}**: Z-Score {base['z_score']:.2f}")
-            st.area_chart(base['history'], height=80, color="#29b5e8")
-            st.write(f"**USD**: Z-Score {usd['z_score']:.2f}")
-            st.area_chart(usd['history'], height=80, color="#ffaa00")
+# --- MAIN TABS (IL NUOVO LAYOUT) ---
+tab1, tab2, tab3 = st.tabs(["🔍 Analisi Macro (COT)", "📅 Stagionalità & Cicli", "🐑 Sentiment & Volumi"])
+
+with tab1:
+    if cot_base and cot_usd:
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.markdown(f"#### {sel_asset.split('/')[0]}")
+            st.metric("Z-Score (Forza)", f"{cot_base['z_score']:.2f}", help="Sopra 2.0 è ipercomprato")
+            st.area_chart(cot_base['history'], height=150, color="#29b5e8")
+        with c_b:
+            st.markdown("#### USD (Dollaro)")
+            st.metric("Z-Score (Forza)", f"{cot_usd['z_score']:.2f}")
+            st.area_chart(cot_usd['history'], height=150, color="#ffaa00")
             
-            # Dati per AI
-            ai_context['cot_z'] = base['z_score']
-            ai_context['usd_z'] = usd['z_score']
+        with st.expander("🔬 Analisi Approfondita (Long/Short & OI)"):
+            st.markdown("##### Struttura Posizioni")
+            hist_data = cot_base['history_full'].reset_index()
+            melted = hist_data.melt('Date', value_vars=['Long', 'Short'], var_name='Type', value_name='Contracts')
+            chart_ls = alt.Chart(melted).mark_line().encode(
+                x='Date', y='Contracts', color=alt.Color('Type', scale=alt.Scale(range=['green', 'red']))
+            ).properties(height=250)
+            st.altair_chart(chart_ls, use_container_width=True)
             
-            with st.expander(f"🔬 Struttura: {sel_asset}"):
-                st.markdown(f"##### {sel_asset}: Long vs Short")
-                hist_data = base['history_full'].reset_index()
-                melted = hist_data.melt('Date', value_vars=['Long', 'Short'], var_name='Type', value_name='Contracts')
-                chart_ls = alt.Chart(melted).mark_line().encode(
-                    x='Date', y='Contracts',
-                    color=alt.Color('Type', scale=alt.Scale(domain=['Long', 'Short'], range=['green', 'red'])),
-                    tooltip=['Date', 'Type', 'Contracts']
-                ).properties(height=200)
-                st.altair_chart(chart_ls, use_container_width=True)
-                
-                st.markdown(f"##### Open Interest")
-                st.bar_chart(base['history_full']['OpenInt'], height=150)
-                
-                st.markdown("##### Flussi Settimanali")
-                raw = base['raw_data'].head(3).copy()
-                raw["Δ Long"] = raw["Long"] - raw["Long"].shift(-1)
-                raw["Δ Short"] = raw["Short"] - raw["Short"].shift(-1)
-                raw["Δ Net"] = raw["Net"] - raw["Net"].shift(-1)
-                display_table = raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short", "Net"]].copy()
-                display_table["Date"] = display_table["Date"].dt.strftime('%d/%m')
-                st.dataframe(display_table.style.format({"Long": "{:,.0f}", "Short": "{:,.0f}", "Net": "{:,.0f}", "Δ Long": "{:+,.0f}", "Δ Short": "{:+,.0f}"}), hide_index=True, use_container_width=True)
+            st.markdown("##### Flussi Recenti")
+            raw = cot_base['raw_data'].head(3).copy()
+            raw["Δ Long"] = raw["Long"] - raw["Long"].shift(-1)
+            raw["Δ Short"] = raw["Short"] - raw["Short"].shift(-1)
+            st.dataframe(raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short"]], use_container_width=True)
+    else:
+        st.warning("Dati COT non disponibili o errore download.")
 
-            score_cot = 0
-            if base['z_score'] > 0.5 and usd['z_score'] < -0.5:
-                st.success("✅ STRONG LONG")
-                score_cot = 1
-            elif base['z_score'] < -0.5 and usd['z_score'] > 0.5:
-                st.error("🔻 STRONG SHORT")
-                score_cot = -1
-            else: st.info("⚖️ Neutrale")
-        else: st.warning("Dati COT insufficienti")
-    else: st.error("Err COT")
-
-# 2. STAGIONALITÀ
-with col2:
-    st.header("2. Stagionalità 📅")
-    seas = get_seasonality_pro(cfg["yf"])
+with tab2:
     if seas:
-        c_win, c_avg = st.columns(2)
-        c_win.metric("Win Rate (10y)", f"{int(seas['win_rate'])}%")
-        c_avg.metric("Ritorno", f"{seas['avg_return']:.2f}%")
-        
-        st.markdown("**Ciclo Annuale (Smoothed)**")
-        chart_df = pd.DataFrame({'Giorno': seas['chart'].index, 'Valore': seas['chart'].values})
-        today_line = alt.Chart(pd.DataFrame({'x': [seas['day']]})).mark_rule(color='red').encode(x='x')
-        line = alt.Chart(chart_df).mark_line().encode(
-            x=alt.X('Giorno', title='Giorno'), y=alt.Y('Valore', scale=alt.Scale(zero=False), title='Idx'), tooltip=['Giorno', 'Valore']
-        ).properties(height=200)
-        st.altair_chart(line + today_line, use_container_width=True)
-        
-        curr_day = seas['day']
-        try:
-            today_val = seas['chart'].iloc[curr_day - 1]
-            future_idx = min(curr_day + 30, 364)
-            future_val = seas['chart'].iloc[future_idx]
-            trend = "RIALZISTA 📈" if future_val > today_val * 1.005 else "RIBASSISTA 📉" if future_val < today_val * 0.995 else "LATERALE ➡️"
-            st.info(f"🔮 Previsione 30gg: **{trend}**")
-            
-            # Dati AI
-            ai_context['seas_win'] = int(seas['win_rate'])
-            ai_context['seas_trend'] = trend
-        except: pass
-            
-        score_seas = 0
-        if seas['win_rate'] >= 65: 
-            st.success("✅ Mese Forte")
-            score_seas = 1
-        elif seas['win_rate'] <= 35: 
-            st.error("🔻 Mese Debole")
-            score_seas = -1
-        else: st.warning("⚠️ Mese Misto")
-    else: st.write("Loading...")
+        c_a, c_b = st.columns([1, 2])
+        with c_a:
+            st.metric("Win Rate Storico", f"{int(seas['win_rate'])}%")
+            st.caption("Probabilità che il mese chiuda positivo (10y)")
+        with c_b:
+            st.markdown("##### Ciclo Annuale Medio")
+            chart_df = pd.DataFrame({'Giorno': seas['chart'].index, 'Valore': seas['chart'].values})
+            today_line = alt.Chart(pd.DataFrame({'x': [seas['day']]})).mark_rule(color='red', strokeDash=[5,5]).encode(x='x')
+            line = alt.Chart(chart_df).mark_line().encode(
+                x=alt.X('Giorno', title='Giorno dell\'anno'), 
+                y=alt.Y('Valore', scale=alt.Scale(zero=False), title='Indice')
+            ).properties(height=250)
+            st.altair_chart(line + today_line, use_container_width=True)
+            st.caption("La linea rossa indica oggi. Guarda se la curva sale o scende da questo punto.")
 
-# 3. SENTIMENT
-with col3:
-    st.header("3. Sentiment 🐑")
-    sent = get_sentiment_data(cfg["myfx"])
+with tab3:
     if sent["status"] == "OK":
-        c_s, c_l = st.columns(2)
-        c_s.metric("Short", f"{sent['short']}%", delta_color="inverse")
-        c_l.metric("Long", f"{sent['long']}%")
+        c_a, c_b = st.columns(2)
+        c_a.metric("Retail Short 🔴", f"{sent['short']}%")
+        c_b.metric("Retail Long 🟢", f"{sent['long']}%")
         st.progress(sent['long']/100)
-        st.caption(f"Vol: {sent['vol']}")
         
-        # Dati AI
-        ai_context['sent_long'] = sent['long']
-        ai_context['sent_short'] = sent['short']
+        st.info(f"📊 Volume Totale: {sent['vol']}")
         
-        score_sent = 0
-        if sent['long'] > 60: 
-            st.success("✅ Crowd Long -> SHORT")
-            score_sent = -1
-        elif sent['short'] > 60: 
-            st.success("✅ Crowd Short -> LONG")
-            score_sent = 1
-        else: st.warning("⚠️ Neutrale")
-    else: st.error("No Data")
-
-st.markdown("---")
-
-# SCORE & AI ANALYST
-if 'score_cot' in locals() and 'score_seas' in locals() and 'score_sent' in locals():
-    total = score_cot + score_seas + score_sent
-    st.subheader("🎯 VERDETTO FINALE")
-    
-    # Prepariamo dati AI finali
-    if tech:
-        ai_context['asset'] = sel_asset
-        ai_context['price'] = f"{tech['price']:.4f}"
-        ai_context['trend'] = tech['trend_desc']
-        ai_context['rsi'] = tech['rsi']
-    
-    c_fin, c_chk = st.columns([2,1])
-    with c_fin:
-        if total >= 2: st.success(f"🔥 BUY OPPORTUNITY (Score {total}/3)")
-        elif total <= -2: st.error(f"❄️ SELL OPPORTUNITY (Score {total}/3)")
-        else: st.info(f"✋ WAIT / HOLD (Score {total}/3)")
-        
-        # --- PULSANTE AI ---
-        if gemini_key and selected_model:
-            if st.button("🤖 CHIEDI ALL'ANALISTA AI"):
-                with st.spinner(f"Analizzando con {selected_model}..."):
-                    analysis = get_ai_analysis(gemini_key, selected_model, ai_context)
-                    st.markdown("### 🧠 Analisi AI")
-                    st.markdown(analysis)
-        elif total != 0:
-            st.caption("Inserisci la Gemini API Key e scegli un modello.")
-
-    with c_chk:
-        if tech and tech['sma200']:
-            if tech['rsi']>70: st.warning("⚠️ RSI Ipercomprato")
-            elif tech['rsi']<30: st.warning("⚠️ RSI Ipervenduto")
-            elif total>=2 and tech['price']<tech['sma200']: st.warning("⚠️ Sotto SMA200")
-            elif total<=-2 and tech['price']>tech['sma200']: st.warning("⚠️ Sopra SMA200")
-            else: st.success("✅ Timing Tecnico OK")
+        if sent['long'] > 60:
+            st.success("✅ SEGNALE: La folla sta comprando -> Cerca SHORT")
+        elif sent['short'] > 60:
+            st.success("✅ SEGNALE: La folla sta vendendo -> Cerca LONG")
+        else:
+            st.warning("⚠️ SEGNALE: Sentiment equilibrato (Nessun vantaggio)")
+    else:
+        st.error("Dati Sentiment non disponibili.")
