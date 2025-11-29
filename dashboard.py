@@ -12,29 +12,15 @@ import google.generativeai as genai
 st.set_page_config(page_title="Pro Trend Dashboard", layout="wide", initial_sidebar_state="expanded")
 
 # ==============================================================================
-# CSS PERSONALIZZATO (DESIGN PULITO)
+# CSS PERSONALIZZATO
 # ==============================================================================
 st.markdown("""
 <style>
-/* Spaziatura ridotta */
 div.block-container {padding-top: 1rem; padding-bottom: 2rem;}
-
-/* Metriche più leggibili */
 div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
 div[data-testid="stMetricLabel"] {font-size: 0.9rem !important; font-weight: bold; color: #888;}
-
-/* Tabs più evidenti */
 button[data-baseweb="tab"] {font-size: 1.1rem; font-weight: 600;}
-
-/* Box colorati per i segnali */
-.signal-box {
-    padding: 15px;
-    border-radius: 8px;
-    text-align: center;
-    font-weight: bold;
-    font-size: 1.2rem;
-    margin-bottom: 10px;
-}
+.signal-box {padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;}
 .bullish {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
 .bearish {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
 .neutral {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
@@ -75,7 +61,9 @@ def get_ai_analysis(api_key, model_name, context_data):
         """
         response = model.generate_content(prompt)
         return response.text
-    except Exception as e: return f"Errore AI: {str(e)}"
+    except Exception as e:
+        if "429" in str(e): return "🚦 Limite richieste raggiunto. Attendi 1 min."
+        return f"Errore AI: {str(e)}"
 
 # --- MOTORE 1: TECNICA ---
 def get_technical_analysis(ticker):
@@ -223,14 +211,23 @@ with st.sidebar:
     cfg = asset_map[sel_asset]
     
     st.markdown("---")
-    st.caption("🤖 AI Copilot (Opzionale)")
-    gemini_key = st.text_input("API Key", type="password", placeholder="Incolla AIza...")
+    st.header("🤖 AI Copilot")
+    
+    # --- LOGICA SECRETS ---
+    # Cerca la chiave nel "caveau" di Streamlit
+    if "GEMINI_KEY" in st.secrets:
+        gemini_key = st.secrets["GEMINI_KEY"]
+        st.success("🔑 Key caricata da Secrets!")
+    else:
+        # Se non c'è nel caveau, chiedila all'utente (Fallback per PC locale)
+        gemini_key = st.text_input("API Key (Non salvata)", type="password")
+    
     selected_model = None
     if gemini_key:
         mods = get_filtered_models(gemini_key)
         if mods: selected_model = st.selectbox("Modello", mods)
 
-# --- CALCOLI PRELIMINARI ---
+# --- CALCOLI ---
 tech = get_technical_analysis(cfg["yf"])
 seas = get_seasonality_pro(cfg["yf"])
 sent = get_sentiment_data(cfg["myfx"])
@@ -239,33 +236,27 @@ if cot_ok:
     cot_base = analyze_cot_pro(df_cot, cfg["base"])
     cot_usd = analyze_cot_pro(df_cot, cfg["usd"])
 
-# --- TOP BAR: RIASSUNTO ESECUTIVO ---
-# Calcolo Punteggio Totale
+# --- TOP BAR ---
 total_score = 0
 cot_score = 0
 if cot_base and cot_usd:
     if cot_base['z_score'] > 0.5 and cot_usd['z_score'] < -0.5: cot_score = 1
     elif cot_base['z_score'] < -0.5 and cot_usd['z_score'] > 0.5: cot_score = -1
-    
 seas_score = 0
 if seas and seas['win_rate'] >= 65: seas_score = 1
 elif seas and seas['win_rate'] <= 35: seas_score = -1
-
 sent_score = 0
 if sent["status"] == "OK":
     if sent['long'] > 60: sent_score = -1
     elif sent['short'] > 60: sent_score = 1
-
 total_score = cot_score + seas_score + sent_score
 
-# Visualizzazione Top Bar
 c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
 if tech:
     c1.metric("Prezzo", f"{tech['price']:.4f}", f"{tech['change']:.2f}%")
     c2.metric("RSI (14)", f"{tech['rsi']:.1f}", delta_color="off")
     c3.metric("Trend", tech['trend_desc'], delta_color="off")
 
-# Box Verdetto
 with c4:
     if total_score >= 2:
         st.markdown('<div class="signal-box bullish">🔥 STRONG BUY OPPORTUNITY</div>', unsafe_allow_html=True)
@@ -274,7 +265,7 @@ with c4:
     else:
         st.markdown('<div class="signal-box neutral">✋ MARKET NEUTRAL / WAIT</div>', unsafe_allow_html=True)
 
-# --- AI ANALYST (Se attivato) ---
+# --- AI ANALYST ---
 if gemini_key and selected_model and st.button("🤖 Analizza con AI"):
     ai_ctx = {
         'asset': sel_asset,
@@ -286,10 +277,10 @@ if gemini_key and selected_model and st.button("🤖 Analizza con AI"):
         'seas_trend': "ND",
         'price': tech['price'], 'trend': tech['trend_desc'], 'rsi': tech['rsi']
     }
-    with st.spinner("L'AI sta ragionando..."):
+    with st.spinner("Analizzando i dati..."):
         st.info(get_ai_analysis(gemini_key, selected_model, ai_ctx))
 
-# --- MAIN TABS (IL NUOVO LAYOUT) ---
+# --- TABS ---
 tab1, tab2, tab3 = st.tabs(["🔍 Analisi Macro (COT)", "📅 Stagionalità & Cicli", "🐑 Sentiment & Volumi"])
 
 with tab1:
@@ -305,7 +296,7 @@ with tab1:
             st.area_chart(cot_usd['history'], height=150, color="#ffaa00")
             
         with st.expander("🔬 Analisi Approfondita (Long/Short & OI)"):
-            st.markdown("##### Struttura Posizioni")
+            st.markdown(f"##### {sel_asset}: Long vs Short")
             hist_data = cot_base['history_full'].reset_index()
             melted = hist_data.melt('Date', value_vars=['Long', 'Short'], var_name='Type', value_name='Contracts')
             chart_ls = alt.Chart(melted).mark_line().encode(
@@ -313,20 +304,24 @@ with tab1:
             ).properties(height=250)
             st.altair_chart(chart_ls, use_container_width=True)
             
-            st.markdown("##### Flussi Recenti")
+            st.markdown(f"##### Open Interest")
+            st.bar_chart(cot_base['history_full']['OpenInt'], height=150)
+            
+            st.markdown("##### Flussi Settimanali")
             raw = cot_base['raw_data'].head(3).copy()
             raw["Δ Long"] = raw["Long"] - raw["Long"].shift(-1)
             raw["Δ Short"] = raw["Short"] - raw["Short"].shift(-1)
+            raw["Δ Net"] = raw["Net"] - raw["Net"].shift(-1)
             st.dataframe(raw.head(2)[["Date", "Long", "Δ Long", "Short", "Δ Short"]], use_container_width=True)
     else:
-        st.warning("Dati COT non disponibili o errore download.")
+        st.warning("Dati COT non disponibili.")
 
 with tab2:
     if seas:
         c_a, c_b = st.columns([1, 2])
         with c_a:
             st.metric("Win Rate Storico", f"{int(seas['win_rate'])}%")
-            st.caption("Probabilità che il mese chiuda positivo (10y)")
+            st.caption("Probabilità mese positivo (10y)")
         with c_b:
             st.markdown("##### Ciclo Annuale Medio")
             chart_df = pd.DataFrame({'Giorno': seas['chart'].index, 'Valore': seas['chart'].values})
@@ -336,7 +331,6 @@ with tab2:
                 y=alt.Y('Valore', scale=alt.Scale(zero=False), title='Indice')
             ).properties(height=250)
             st.altair_chart(line + today_line, use_container_width=True)
-            st.caption("La linea rossa indica oggi. Guarda se la curva sale o scende da questo punto.")
 
 with tab3:
     if sent["status"] == "OK":
@@ -344,14 +338,6 @@ with tab3:
         c_a.metric("Retail Short 🔴", f"{sent['short']}%")
         c_b.metric("Retail Long 🟢", f"{sent['long']}%")
         st.progress(sent['long']/100)
-        
         st.info(f"📊 Volume Totale: {sent['vol']}")
-        
-        if sent['long'] > 60:
-            st.success("✅ SEGNALE: La folla sta comprando -> Cerca SHORT")
-        elif sent['short'] > 60:
-            st.success("✅ SEGNALE: La folla sta vendendo -> Cerca LONG")
-        else:
-            st.warning("⚠️ SEGNALE: Sentiment equilibrato (Nessun vantaggio)")
     else:
         st.error("Dati Sentiment non disponibili.")
