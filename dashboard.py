@@ -20,7 +20,9 @@ div.block-container {padding-top: 1rem; padding-bottom: 2rem;}
 div[data-testid="stMetricValue"] {font-size: 1.4rem !important;}
 div[data-testid="stMetricLabel"] {font-size: 0.9rem !important; font-weight: bold; color: #888;}
 button[data-baseweb="tab"] {font-size: 1.1rem; font-weight: 600;}
-.signal-box {padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;}
+.signal-box {
+    padding: 15px; border-radius: 8px; text-align: center; font-weight: bold; font-size: 1.2rem; margin-bottom: 10px;
+}
 .bullish {background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb;}
 .bearish {background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb;}
 .neutral {background-color: #fff3cd; color: #856404; border: 1px solid #ffeeba;}
@@ -32,7 +34,7 @@ current_year = datetime.now().year
 CFTC_URL = f"https://www.cftc.gov/files/dea/history/deacot{current_year}.zip"
 SENTIMENT_URL = "https://www.myfxbook.com/community/outlook"
 
-# --- MOTORE AI (CHAT MODE) ---
+# --- MOTORE AI ---
 def get_filtered_models(api_key):
     try:
         genai.configure(api_key=api_key)
@@ -42,6 +44,29 @@ def get_filtered_models(api_key):
         if not available: available = [m for m in all_models if 'exp' not in m]
         return available
     except: return []
+
+def get_ai_analysis(api_key, model_name, context_data):
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
+        prompt = f"""
+        Analisi Flash per Trader ({context_data['asset']}):
+        1. COT: Z-Score Asset {context_data['cot_z']:.2f} | USD {context_data['usd_z']:.2f}
+        2. SENTIMENT: {context_data['sent_long']}% Long / {context_data['sent_short']}% Short
+        3. STAGIONALITÀ: Win {context_data['seas_win']}% | Trend: {context_data['seas_trend']}
+        4. TECNICA: Prezzo {context_data['price']} | Trend: {context_data['trend']} | RSI: {context_data['rsi']:.1f}
+        5. FORZA RELATIVA (5gg): Asset {context_data['pwr_base']}/10 vs USD {context_data['pwr_usd']}/10
+        
+        Dammi SOLO:
+        1. Il Verdetto (Bullish/Bearish/Neutral)
+        2. Il motivo principale (es. "Confluenza COT e Sentiment")
+        3. Un livello di attenzione (es. "Attenti all'RSI alto")
+        """
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        if "429" in str(e): return "🚦 Limite richieste raggiunto. Attendi 1 min."
+        return f"Errore AI: {str(e)}"
 
 # --- MOTORE 1: TECNICA ---
 def get_technical_analysis(ticker):
@@ -74,13 +99,16 @@ def get_technical_analysis(ticker):
         return {"price": curr, "change": chg, "trend_desc": status, "rsi": rsi, "atr": atr, "sma200": sma200}
     except: return None
 
-# --- MOTORE 1.5: FORZA RELATIVA (REINSERITO) ---
+# --- MOTORE 1.5: FORZA RELATIVA (CALIBRATO) ---
 def get_currency_strength(pair_ticker):
     try:
+        # Scarichiamo dati sufficienti per una media a 5 giorni
         tickers = f"DX-Y.NYB {pair_ticker}"
-        data = yf.download(tickers, period="5d", progress=False)['Close']
+        data = yf.download(tickers, period="1mo", progress=False)['Close']
+        
         if data.empty: return None
         
+        # Gestione Colonne
         if isinstance(data.columns, pd.MultiIndex):
             dxy = data["DX-Y.NYB"]
             pair = data[pair_ticker]
@@ -88,14 +116,26 @@ def get_currency_strength(pair_ticker):
             dxy = data["DX-Y.NYB"]
             pair = data[pair_ticker]
 
-        dxy_chg = ((dxy.iloc[-1] - dxy.iloc[-2]) / dxy.iloc[-2]) * 100
-        pair_chg = ((pair.iloc[-1] - pair.iloc[-2]) / pair.iloc[-2]) * 100
+        # Calcolo Variazione a 5 Giorni (Più stabile)
+        # pct_change(5) calcola la variazione rispetto a 5 giorni fa
+        dxy_move = dxy.pct_change(5).iloc[-1] * 100
+        pair_move = pair.pct_change(5).iloc[-1] * 100
         
-        usd_score = 5 + (dxy_chg * 4) 
-        base_chg_est = pair_chg + dxy_chg
-        base_score = 5 + (base_chg_est * 4)
+        # Logica: 
+        # USD Score = Parte da 5. Se DXY sale dell'1% in 5gg -> 5 + (1 * 2) = 7.
+        # Moltiplicatore ridotto a 2.0 (era troppo alto prima)
+        usd_score = 5 + (dxy_move * 2.0)
         
-        return {"base": max(0, min(10, base_score)), "usd": max(0, min(10, usd_score))}
+        # Base Score (es. EUR) = Pair + USD
+        # Se EURUSD sale (+1%) e USD sale (+1%), EUR deve essere salito del 2% (Fortissimo)
+        base_move = pair_move + dxy_move
+        base_score = 5 + (base_move * 2.0)
+        
+        # Limiti 0-10
+        return {
+            "base": max(0, min(10, base_score)), 
+            "usd": max(0, min(10, usd_score))
+        }
     except: return None
 
 # --- MOTORE 2: SENTIMENT ---
@@ -198,7 +238,7 @@ st.title("🦅 Pro Analyst Dashboard")
 
 df_cot, cot_ok = download_cot_data(CFTC_URL)
 
-# --- SIDEBAR (CONFIGURAZIONE) ---
+# SIDEBAR
 with st.sidebar:
     st.header("⚙️ Configurazione")
     asset_map = {
@@ -213,8 +253,7 @@ with st.sidebar:
     cfg = asset_map[sel_asset]
     
     st.markdown("---")
-    
-    # Chiave nascosta ma caricata
+    # AI KEYS
     if "GEMINI_KEY" in st.secrets:
         gemini_key = st.secrets["GEMINI_KEY"]
         st.success("🔑 AI Ready")
@@ -224,11 +263,11 @@ with st.sidebar:
     selected_model = None
     if gemini_key:
         mods = get_filtered_models(gemini_key)
-        if mods: selected_model = st.selectbox("Modello", mods)
+        if mods: selected_model = st.selectbox("Modello AI", mods)
 
 # --- CALCOLI ---
 tech = get_technical_analysis(cfg["yf"])
-pwr = get_currency_strength(cfg["yf"]) # POWER METER CALC
+pwr = get_currency_strength(cfg["yf"]) # POWER METER FIXED
 seas = get_seasonality_pro(cfg["yf"])
 sent = get_sentiment_data(cfg["myfx"])
 cot_base, cot_usd = None, None
@@ -267,7 +306,7 @@ with c4:
 
 # --- FORZA RELATIVA (POWER METER) ---
 if pwr:
-    st.markdown("### 💪 Forza Relativa (Power Meter)")
+    st.markdown("### 💪 Forza Relativa (Power Meter - 5gg)")
     cp1, cp2 = st.columns(2)
     asset_name = sel_asset.split('/')[0]
     with cp1:
@@ -350,47 +389,24 @@ with tab3:
 
 st.markdown("---")
 
-# --- CHAT AI (CONTESTUALE) ---
-st.subheader("💬 Chatta con l'Analista AI")
+# --- SEZIONE AI (IN BASSO) ---
+st.subheader("🧠 Analisi Operativa AI")
 
 if gemini_key and selected_model:
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-
-    # Mostra la cronologia
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # Input Utente
-    if prompt := st.chat_input("Chiedimi qualcosa sui dati... (es. 'Perché il COT è così?')"):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
-
-        # Preparazione Dati per AI
-        context_str = f"""
-        DATI LIVE DASHBOARD:
-        - Asset: {sel_asset}
-        - Prezzo: {tech['price']} (Trend: {tech['trend_desc']})
-        - RSI: {tech['rsi']:.1f}
-        - Forza Relativa: {pwr['base']}/10 vs USD {pwr['usd']}/10
-        - COT Z-Score: {cot_base['z_score'] if cot_base else 'ND'}
-        - Sentiment Retail: {sent['long'] if sent['status']=='OK' else 0}% Long
-        """
-        
-        with st.chat_message("assistant"):
-            with st.spinner("Ragionando..."):
-                try:
-                    genai.configure(api_key=gemini_key)
-                    model = genai.GenerativeModel(selected_model)
-                    
-                    full_prompt = f"Sei un Trader esperto. Rispondi alla domanda basandoti su questi dati:\n{context_str}\n\nDOMANDA: {prompt}"
-                    response = model.generate_content(full_prompt)
-                    
-                    st.markdown(response.text)
-                    st.session_state.messages.append({"role": "assistant", "content": response.text})
-                except Exception as e:
-                    st.error(f"Errore: {e}")
+    if st.button("🤖 Chiedi all'Analista"):
+        ai_ctx = {
+            'asset': sel_asset,
+            'pwr_base': pwr['base'] if pwr else 0, # Passiamo la forza relativa all'AI
+            'pwr_usd': pwr['usd'] if pwr else 0,
+            'cot_z': cot_base['z_score'] if cot_base else 0,
+            'usd_z': cot_usd['z_score'] if cot_usd else 0,
+            'sent_long': sent['long'] if sent['status']=='OK' else 50,
+            'sent_short': sent['short'] if sent['status']=='OK' else 50,
+            'seas_win': int(seas['win_rate']) if seas else 50,
+            'seas_trend': "ND",
+            'price': tech['price'], 'trend': tech['trend_desc'], 'rsi': tech['rsi']
+        }
+        with st.spinner("Analizzando i mercati..."):
+            st.markdown(get_ai_analysis(gemini_key, selected_model, ai_ctx))
 else:
-    st.info("Inserisci la chiave API per attivare la chat.")
+    st.info("Per usare l'assistente AI, assicurati che la chiave sia salvata nei Secrets o inseriscila nella Sidebar.")
