@@ -130,24 +130,31 @@ def get_ai_analysis(api_key, model_name, context_data):
         if "429" in str(e): return "🚦 Limite richieste raggiunto. Attendi 1 min."
         return f"Errore AI: {str(e)}"
 
-# --- MOTORE 1: TECNICA ---
+# --- MOTORE 1: TECNICA (RSI CORRETTO - WILDER'S SMOOTHING) ---
 def get_technical_analysis(ticker):
     try:
         stock = yf.Ticker(ticker)
+        # Scarichiamo un po' più dati per stabilizzare la media mobile esponenziale
         hist = stock.history(period="2y")
         if hist.empty: return None
         curr = hist["Close"].iloc[-1]
         prev = hist["Close"].iloc[-2]
         chg = ((curr - prev) / prev) * 100
         sma200 = hist["Close"].rolling(200).mean().iloc[-1] if len(hist) >= 200 else None
-        sma50 = hist["Close"].rolling(50).mean().iloc[-1] if len(hist) >= 50 else None
         
+        # Calcolo RSI Standard (Wilder's Smoothing)
         delta = hist["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
+        gain = (delta.where(delta > 0, 0))
+        loss = (-delta.where(delta < 0, 0))
+        
+        # Uso ewm con alpha=1/14 approssima il metodo di Wilder
+        avg_gain = gain.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/14, min_periods=14, adjust=False).mean()
+        
+        rs = avg_gain / avg_loss
         rsi = 100 - (100 / (1 + rs)).iloc[-1]
         
+        # ATR Calculation
         high_low = hist["High"] - hist["Low"]
         h_c = np.abs(hist["High"] - hist["Close"].shift())
         l_c = np.abs(hist["Low"] - hist["Close"].shift())
@@ -160,7 +167,6 @@ def get_technical_analysis(ticker):
             
         return {"price": curr, "change": chg, "trend_desc": status, "rsi": rsi, "atr": atr, "sma200": sma200}
     except: return None
-
 # --- MOTORE 1.5: FORZA RELATIVA ---
 def get_currency_strength(pair_ticker):
     try:
@@ -207,26 +213,9 @@ def get_sentiment_data(target_pair):
         return {"status": "Err", "msg": "HTTP Err"}
     except Exception as e: return {"status": "Err", "msg": str(e)}
 
-# --- MOTORE 3: COT ---
-@st.cache_data(ttl=86400)
-def download_cot_data(url):
-    try:
-        r = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=30)
-        if r.status_code == 200:
-            with io.BytesIO(r.content) as z:
-                df = pd.read_csv(z, header=None, compression='zip', usecols=[0, 2, 7, 8, 9], low_memory=False)
-            df.columns = ["Asset", "Date", "OpenInt", "Long", "Short"]
-            df["Asset"] = df["Asset"].str.strip().str.upper()
-            df["Long"] = pd.to_numeric(df["Long"], errors='coerce').fillna(0)
-            df["Short"] = pd.to_numeric(df["Short"], errors='coerce').fillna(0)
-            df["OpenInt"] = pd.to_numeric(df["OpenInt"], errors='coerce').fillna(0)
-            df["Net"] = df["Long"] - df["Short"]
-            df["Date"] = pd.to_datetime(df["Date"], errors='coerce')
-            return df, True
-        return pd.DataFrame(), False
-    except: return pd.DataFrame(), False
-
+# --- MOTORE 3: COT (PERCENTILE RANK & Z-SCORE ROBUSTO) ---
 def analyze_cot_pro(df, asset_name):
+    # Filtro Asset
     mask = df["Asset"].str.contains(asset_name, case=False, na=False)
     if asset_name in ["EURO FX", "BRITISH POUND"]: 
         exclude_mask = df["Asset"].str.contains("XRATE", case=False, na=False)
@@ -234,6 +223,7 @@ def analyze_cot_pro(df, asset_name):
     matches = df[mask]["Asset"].unique()
     if len(matches) == 0: return None
     
+    # Selezione ticker migliore
     if "USD" in asset_name and any("ICE" in m for m in matches):
         best = [m for m in matches if "ICE" in m][0]
     else:
@@ -242,15 +232,30 @@ def analyze_cot_pro(df, asset_name):
     d = df[df["Asset"] == best].sort_values("Date", ascending=False).drop_duplicates(subset=['Date'])
     if len(d) < 2: return None
     
-    lookback = d.head(52).copy()
+    # Aumentiamo il lookback a 3 anni (156 settimane) per significatività statistica
+    lookback_period = 156 if len(d) >= 156 else len(d)
+    lookback = d.head(lookback_period).copy()
+    
     curr = lookback.iloc[0]["Net"]
+    
+    # 1. Z-Score (Parametrico)
     std = lookback["Net"].std()
     mean = lookback["Net"].mean()
-    idx = ((curr - lookback["Net"].min()) / (lookback["Net"].max() - lookback["Net"].min())) * 100
     z_score = (curr - mean) / std if std != 0 else 0
     
+    # 2. Percentile Rank (Non-Parametrico - Più robusto per dati non normali)
+    # Calcola in quale percentile si trova il valore attuale rispetto allo storico
+    percentile = (lookback["Net"] < curr).mean() * 100
+    
+    # Index classico (Min-Max su periodo)
+    idx = ((curr - lookback["Net"].min()) / (lookback["Net"].max() - lookback["Net"].min())) * 100 if (lookback["Net"].max() - lookback["Net"].min()) != 0 else 50
+    
     return {
-        "name": best, "net": curr, "index": idx, "z_score": z_score, 
+        "name": best, 
+        "net": curr, 
+        "index": idx,           # Min-Max Scaling (0-100)
+        "z_score": z_score,     # Deviazioni Standard
+        "percentile": percentile, # Rango Percentile (0-100)
         "history": lookback.set_index("Date")["Net"], 
         "history_full": lookback.set_index("Date")[["Net", "Long", "Short", "OpenInt"]],
         "raw_data": d
