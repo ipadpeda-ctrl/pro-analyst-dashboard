@@ -274,7 +274,7 @@ def get_seasonality_pro(ticker):
         df_seas['Year'] = df_seas.index.year
         piv = df_seas.pivot_table(index='DayOfYear', columns='Year', values='Close')
         piv_norm = piv.apply(lambda x: (x / x.dropna().iloc[0]) * 100 if not x.dropna().empty else np.nan)
-        avg_path = piv_norm.mean(axis=1)
+        avg_path = piv_norm.median(axis=1)
         avg_path_smooth = avg_path.rolling(window=7, center=True).mean().fillna(method='bfill').fillna(method='ffill')
         return {"win_rate": win_rate, "avg_return": avg_ret, "chart": avg_path_smooth, "day": datetime.now().timetuple().tm_yday}
     except: return None
