@@ -1,0 +1,10 @@
+streamlit
+pandas
+yfinance
+requests
+beautifulsoup4
+altair
+google-generativeai
+streamlit-option-menu
+playwright
+matplotlib
